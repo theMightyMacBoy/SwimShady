@@ -1,0 +1,12 @@
+bin/
+obj/
+publish/
+*.user
+# Only the placeholder appsettings.json is committed. Any environment-specific or
+# local variant can carry real secrets (JWT keys, connection strings) — keep them out.
+appsettings.*.json
+!appsettings.json
+
+# Local Azure deployment notes (real values, secrets). Template: azure.example.md
+azure.local.md
+*.local.md

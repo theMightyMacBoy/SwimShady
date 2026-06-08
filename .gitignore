@@ -1,0 +1,12 @@
+# Secrets — Wi-Fi password, device tokens, API keys. Never commit.
+secrets.yaml
+
+# ESPHome build artifacts
+.esphome/
+*.bin
+
+# macOS
+.DS_Store
+
+# Captured device logs (contain MAC / SSID / IP / endpoint URLs)
+*.log

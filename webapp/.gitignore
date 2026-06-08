@@ -1,0 +1,3 @@
+# Local config holds the real api_base URL — keep it out of git.
+# Commit src/config.example.php (placeholders) as the template instead.
+src/config.php

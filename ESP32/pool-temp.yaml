@@ -1,0 +1,499 @@
+# Swim Shady cloud identity. device_uid matches the device registered in the API.
+# The device token lives in secrets.yaml as `swimshady_token`; the endpoint URL isn't
+# secret, so it's here (and shown on the local web UI). See api/ + webapp/DEVICE_API.md.
+substitutions:
+  device_uid: "pool-esp32"
+  swimshady_url: !secret swimshady_url
+  # Bump on every build, and upload the matching .ota.bin under the SAME version string
+  # to the API. The device self-updates when the API's latest version differs from this.
+  firmware_version: "2026.06.08.4"
+
+esphome:
+  name: pool-esp32
+  friendly_name: "Derek's Pool"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      # http_request is synchronous and blocks the main loop. Give the ESP-IDF task
+      # watchdog generous headroom so a slow/cold-starting API response (Azure F1 has
+      # no Always On) can't trip it and reboot the device (which drops both relays).
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "60"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+api:
+ota:
+  - platform: esphome          # dashboard / CLI / USB OTA
+  - platform: http_request     # self-update by pulling a .bin from the API
+
+time:
+  - platform: sntp
+    id: sntp_time
+
+http_request:
+  useragent: "esphome/${device_uid}"
+  # Keep this well under the task watchdog (60s): a stuck request aborts fast instead
+  # of blocking the loop. Normal heartbeats respond in <2s; a cold-start API may take
+  # longer and will simply retry on the next cycle.
+  timeout: 15s
+  # esp-idf HTTPS to Azure. verify_ssl:false skips cert validation — the device token
+  # is the credential. Pin a CA cert for full MITM protection if desired.
+  verify_ssl: false
+
+# System diagnostics (RAM / loop-time / device info). Refreshed every 5s.
+debug:
+  update_interval: 5s
+
+globals:
+  - id: heater_last_off
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: heater_ever_on
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # cooldown_deadline: absolute millis() when the 5-min debt is paid.
+  # If it's in the future, cool-down debt exists (clock always ticking).
+  - id: cooldown_deadline
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # parked: true only while pump is stopped/waiting out the debt (display = Cooling Down).
+  - id: parked
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Swim Shady heartbeat tracking.
+  - id: last_ok_ms        # millis() of last 200 OK heartbeat (0 = none since boot)
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: last_ok_epoch     # unix time of last OK heartbeat (persists across reboot)
+    type: uint32_t
+    restore_value: yes
+    initial_value: '0'
+  # OTA: set by the heartbeat when the API offers a newer build; consumed (idle-gated)
+  # by the OTA interval below.
+  - id: ota_pending
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: ota_url
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  - id: ota_md5url
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  # Boot-state restore: false until we've fetched last-known state from the API (or
+  # confirmed there is none). Gates the heartbeat so we don't overwrite stored state
+  # with the boot-default OFF before restoring.
+  - id: restore_done
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+one_wire:
+  - platform: gpio
+    pin: GPIO33
+
+sensor:
+  - platform: dallas_temp
+    name: "Pool Water Temp"
+    id: pool_water_temp
+    update_interval: 1s
+    unit_of_measurement: "°F"
+    filters:
+      - filter_out: nan
+      - lambda: 'return x * (9.0/5.0) + 32.0;'
+
+  # --- System diagnostics (all 5s refresh) ---
+  - platform: debug
+    free:
+      name: "Free RAM"          # free heap, bytes (RAM usage proxy)
+    block:
+      name: "RAM Largest Block" # largest free block (fragmentation indicator)
+    loop_time:
+      name: "Loop Time"         # ms per main loop (CPU-load proxy; no true CPU% on ESP32)
+
+  - platform: uptime
+    id: uptime_sec          # raw seconds; formatted into the "Uptime" text_sensor below
+    internal: true
+    update_interval: 5s
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 5s
+
+number:
+  - platform: template
+    name: "Pool Target Temp"
+    id: control_temp
+    optimistic: true
+    min_value: 70
+    max_value: 104
+    step: 1
+    initial_value: 82
+    restore_value: true
+    unit_of_measurement: "°F"
+    mode: slider
+
+text_sensor:
+  # Device/build info — includes flash (storage) size, which is static at runtime.
+  - platform: debug
+    device:
+      name: "Device Info"
+    reset_reason:
+      name: "Reset Reason"
+
+  - platform: template
+    name: "Uptime"
+    id: uptime_human
+    update_interval: 5s
+    lambda: |-
+      uint32_t total = (uint32_t) id(uptime_sec).state;
+      uint32_t days  = total / 86400;
+      uint32_t hours = (total % 86400) / 3600;   // 0–23 (24-hour)
+      uint32_t mins  = (total % 3600) / 60;
+      uint32_t secs  = total % 60;
+      char buf[64];
+      snprintf(buf, sizeof(buf), "%02u Days %02u Hours %02u Minutes %02u Seconds",
+               days, hours, mins, secs);
+      return {std::string(buf)};
+
+  - platform: template
+    name: "Pump Status"
+    id: pump_status
+    update_interval: 1s
+    lambda: |-
+      if (id(parked)) return {"Cooling Down"};
+      if (id(pump_relay).state) return {"ON"};
+      return {"OFF"};
+
+  - platform: template
+    name: "Cool Down Remaining"
+    id: cooldown_remaining
+    update_interval: 1s
+    lambda: |-
+      uint32_t now = millis();
+      if (now >= id(cooldown_deadline)) return {"--:--"};
+      uint32_t secs = (id(cooldown_deadline) - now) / 1000;
+      char buf[8];
+      snprintf(buf, sizeof(buf), "%02u:%02u", secs / 60, secs % 60);
+      return {buf};
+
+  - platform: template
+    name: "Heater Status"
+    id: heater_status
+    update_interval: 1s
+    lambda: |-
+      if (id(heater_relay).state) return {"ON"};
+      // While the system is actively trying to maintain temp but the heater is
+      // off, surface the 2:30 anti-short-cycle lockout as a countdown.
+      uint32_t now = millis();
+      bool want_heat =
+        !isnan(id(pool_water_temp).state) &&
+        id(pool_system).state &&
+        id(pump_relay).state &&
+        !id(parked) &&
+        id(pool_water_temp).state < id(control_temp).state &&
+        id(pool_water_temp).state < 104.0;
+      if (want_heat && id(heater_ever_on)) {
+        uint32_t since_off = now - id(heater_last_off);
+        if (since_off < 150000) {
+          uint32_t secs = (150000 - since_off) / 1000;
+          char buf[24];
+          snprintf(buf, sizeof(buf), "Temp Lockout %02u:%02u", secs / 60, secs % 60);
+          return {std::string(buf)};
+        }
+      }
+      return {"OFF"};
+
+  # Swim Shady connection status: "Connected" if a heartbeat succeeded within the last
+  # 60s (1 min), else the last successful time, or "Never connected". With a 30s
+  # check-in, that tolerates one missed heartbeat before showing disconnected.
+  - platform: template
+    name: "Swim Shady"
+    id: swimshady_status
+    update_interval: 1s
+    lambda: |-
+      if (id(last_ok_ms) != 0 && (millis() - id(last_ok_ms)) <= 60000) {
+        return {"Connected"};
+      }
+      if (id(last_ok_epoch) == 0) {
+        return {"Never connected"};
+      }
+      time_t t = (time_t) id(last_ok_epoch);
+      struct tm *lt = localtime(&t);
+      char buf[48];
+      strftime(buf, sizeof(buf), "Last: %Y-%m-%d %H:%M:%S", lt);
+      return {std::string(buf)};
+
+  - platform: template
+    name: "Swim Shady Endpoint"
+    id: swimshady_endpoint
+    update_interval: 60s
+    lambda: 'return {"${swimshady_url}"};'
+
+  - platform: template
+    name: "Firmware Version"
+    id: firmware_version_sensor
+    update_interval: 60s
+    lambda: 'return {"${firmware_version}"};'
+
+switch:
+  - platform: gpio
+    pin: GPIO25
+    id: pump_relay
+    internal: true
+
+  - platform: gpio
+    pin: GPIO26
+    id: heater_relay
+    internal: true
+    on_turn_off:
+      then:
+        - lambda: 'id(heater_last_off) = millis();'
+
+  - platform: template
+    name: "Pool Pump"
+    id: pump_control
+    optimistic: true
+    lambda: 'return id(pump_relay).state;'
+    turn_on_action:
+      - lambda: 'id(parked) = false;'
+      - switch.turn_on: pump_relay
+    turn_off_action:
+      - script.execute: shutdown_with_cooldown
+
+  - platform: template
+    name: "Pool Heat System"
+    id: pool_system
+    optimistic: true
+    # Heating ENABLE only — turning it on does NOT start the pump. The 1s control loop
+    # fires the heater only when BOTH this and the pump are on (+ temp/lockout conditions),
+    # so Heat System ON with the pump off does nothing until the pump is started.
+    turn_off_action:
+      # Stop heating immediately; leave the pump alone (it keeps circulating if running).
+      # The heater relay's on_turn_off stamps heater_last_off, so the fireman cool-down
+      # debt is still computed correctly whenever the PUMP is later turned off.
+      - if:
+          condition:
+            switch.is_on: heater_relay
+          then:
+            - switch.turn_off: heater_relay
+
+button:
+  - platform: template
+    name: "Cancel Cool Down"
+    id: cancel_cooldown
+    on_press:
+      then:
+        # Resume the pump. Debt clock (cooldown_deadline) keeps running underneath.
+        - lambda: 'id(parked) = false;'
+        - switch.turn_on: pump_relay
+
+script:
+  - id: shutdown_with_cooldown
+    then:
+      # Only fire the turn-off (and its heater_last_off timestamp) on a real
+      # transition; if the heater is already off, leave heater_last_off intact
+      # so the cooldown debt reflects when it actually last ran.
+      - if:
+          condition:
+            switch.is_on: heater_relay
+          then:
+            - switch.turn_off: heater_relay
+      - lambda: |-
+          uint32_t now = millis();
+          // Establish/refresh the debt deadline based on time since heater last off.
+          // If a debt deadline is already in the future (carried over), keep the later of the two.
+          uint32_t since_off = id(heater_ever_on) ? (now - id(heater_last_off)) : 300000;
+          uint32_t needed = (since_off >= 300000) ? 0 : (300000 - since_off);
+          uint32_t new_deadline = now + needed;
+          if (new_deadline > id(cooldown_deadline)) {
+            id(cooldown_deadline) = new_deadline;
+          }
+          // Decide: still owe time?
+          if (now < id(cooldown_deadline)) {
+            id(parked) = true;          // park pump, display Cooling Down
+          } else {
+            id(parked) = false;
+            id(pump_relay).turn_off();  // debt already paid, stop immediately
+          }
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          uint32_t now = millis();
+          bool want_heat =
+            !isnan(id(pool_water_temp).state) &&
+            id(pool_system).state &&
+            id(pump_relay).state &&
+            !id(parked) &&                                  // Pump Status must be ON (not parked)
+            id(pool_water_temp).state < id(control_temp).state &&
+            id(pool_water_temp).state < 104.0;              // hard runaway cutoff
+          // Anti-short-cycle: once the heater turns off, hold it off for 2:30.
+          bool locked_out = id(heater_ever_on) && (now - id(heater_last_off)) < 150000;
+          if (want_heat && !locked_out) {
+            if (!id(heater_relay).state) {
+              id(heater_relay).turn_on();
+              id(heater_ever_on) = true;
+            }
+          } else if (id(heater_relay).state) {
+            // Only turn off on a real transition so heater_last_off (lockout +
+            // cooldown debt) reflects when the heater actually last ran.
+            id(heater_relay).turn_off();
+          }
+
+  - interval: 500ms
+    then:
+      - lambda: |-
+          uint32_t now = millis();
+          // If parked and the debt deadline passes, stop the pump and clear parked.
+          if (id(parked) && now >= id(cooldown_deadline)) {
+            id(parked) = false;
+            id(pump_relay).turn_off();
+          }
+
+  # Firmware OTA: when the API has offered a newer build AND the pool is fully idle
+  # (heat system off, pump off, not cooling down), download + flash it. The device
+  # reboots on success; idle-gating ensures that never interrupts active operation.
+  - interval: 15s
+    then:
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(ota_pending);'
+              - switch.is_off: pool_system
+              - switch.is_off: pump_relay
+              - lambda: 'return !id(parked);'
+          then:
+            - lambda: |-
+                id(ota_pending) = false;
+                ESP_LOGI("ota", "Starting OTA from %s", id(ota_url).c_str());
+            - ota.http_request.flash:
+                url: !lambda 'return id(ota_url);'
+                md5_url: !lambda 'return id(ota_md5url);'
+
+  # Boot-state restore: once after boot, fetch the last-known state from the API and
+  # re-apply it (resume after power loss/reboot). Retries every 5s until a 200 arrives
+  # (waits out WiFi/API readiness). If the API is unreachable we stay in the safe OFF
+  # default — we only resume when the cloud confirms the last state.
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(restore_done);'
+          then:
+            - http_request.get:
+                url: !lambda |-
+                  std::string u = "${swimshady_url}";
+                  size_t p = u.rfind("/heartbeat");
+                  if (p != std::string::npos) u.replace(p, std::string("/heartbeat").size(), "/state");
+                  return u;
+                request_headers:
+                  X-Device-Token: !secret swimshady_token
+                capture_response: true
+                on_response:
+                  then:
+                    - lambda: |-
+                        if (response->status_code != 200) return;  // not ready — retry next tick
+                        id(restore_done) = true;                   // got an answer; stop retrying
+                        if (body.empty()) return;
+                        json::parse_json(body, [](JsonObject root) -> bool {
+                          if (!(root["hasState"] | false)) return true;  // nothing stored yet
+                          if (root["targetTemp"].is<int>()) {
+                            int target = root["targetTemp"].as<int>();
+                            if (target >= 70 && target <= 104) {
+                              auto call = id(control_temp).make_call();
+                              call.set_value(target);
+                              call.perform();
+                            }
+                          }
+                          // Resume pump first, then the heat-system enable; the 1s control
+                          // loop decides whether the heater actually fires.
+                          if (root["pumpOn"] | false)   id(pump_control).turn_on();
+                          if (root["systemOn"] | false) id(pool_system).turn_on();
+                          return true;
+                        });
+
+  # Swim Shady heartbeat: POST current state, pull + apply queued commands.
+  # Device-initiated (it's behind NAT). Gated on restore_done so the first report
+  # never clobbers stored state before the boot restore above runs.
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(restore_done);'
+          then:
+            - http_request.post:
+                url: "${swimshady_url}"
+                request_headers:
+                  X-Device-Token: !secret swimshady_token
+                  Content-Type: application/json
+                json: |-
+                  root["water_temp"] = id(pool_water_temp).state;
+                  root["target_temp"] = id(control_temp).state;
+                  root["pump_on"] = id(pump_relay).state;
+                  root["system_on"] = id(pool_system).state;
+                  root["heater_on"] = id(heater_relay).state;
+                  root["heater_status"] = id(heater_status).state;
+                  root["pump_status"] = id(pump_status).state;
+                  root["cooldown_remaining"] = id(cooldown_remaining).state;
+                  root["firmware_version"] = "${firmware_version}";
+                capture_response: true
+                on_response:
+                  then:
+                    - lambda: |-
+                        if (response->status_code != 200) return;
+                        id(last_ok_ms) = millis();
+                        auto t = id(sntp_time).now();
+                        if (t.is_valid()) id(last_ok_epoch) = t.timestamp;
+                        if (body.empty()) return;
+                        // Apply queued commands through the same template actions as the
+                        // local UI, so all on-device safety logic still applies.
+                        json::parse_json(body, [](JsonObject root) -> bool {
+                          if (root["commands"].is<JsonArray>())
+                          for (JsonObject cmd : root["commands"].as<JsonArray>()) {
+                            std::string action = cmd["action"] | "";
+                            if (action == "system_on")       id(pool_system).turn_on();
+                            else if (action == "system_off") id(pool_system).turn_off();
+                            else if (action == "pump_on")    id(pump_control).turn_on();
+                            else if (action == "pump_off")   id(pump_control).turn_off();
+                            else if (action == "cancel_cooldown") id(cancel_cooldown).press();
+                            else if (action == "set_target") {
+                              int target = atoi(cmd["value"] | "0");
+                              if (target >= 70 && target <= 104) {
+                                auto call = id(control_temp).make_call();
+                                call.set_value(target);
+                                call.perform();
+                              }
+                            }
+                          }
+                          // Firmware OTA offer — staged here; applied later, idle-gated.
+                          if (root["update"].is<JsonObject>()) {
+                            JsonObject up = root["update"];
+                            std::string ver = up["version"] | "";
+                            std::string url = up["url"] | "";
+                            std::string md5url = up["md5Url"] | "";
+                            if (!ver.empty() && !url.empty() && ver != "${firmware_version}") {
+                              id(ota_url) = url;
+                              id(ota_md5url) = md5url;
+                              id(ota_pending) = true;
+                            }
+                          }
+                          return true;
+                        });
+
+web_server:
+  port: 80

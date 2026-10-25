@@ -6,9 +6,17 @@
 set -euo pipefail
 
 PHP=/RunCloud/Packages/php83rc/bin/php
-COMPOSER=/usr/local/bin/composer
-if [[ ! -f "$COMPOSER" ]]; then
-  COMPOSER=/usr/bin/composer
+# RunCloud installs Composer at /usr/sbin/composer. The other paths are fallbacks.
+COMPOSER=""
+for candidate in /usr/sbin/composer /usr/local/bin/composer /usr/bin/composer; do
+  if [[ -f "$candidate" ]]; then
+    COMPOSER=$candidate
+    break
+  fi
+done
+if [[ -z "$COMPOSER" ]]; then
+  echo "Composer was not found. On RunCloud it is usually /usr/sbin/composer." >&2
+  exit 1
 fi
 
 "$PHP" "$COMPOSER" install --no-interaction --prefer-dist --optimize-autoloader --no-dev

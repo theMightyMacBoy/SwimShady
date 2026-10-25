@@ -49,8 +49,11 @@ from the environment.
    - PHP: 8.3 or 8.4
    - Web application type: **Laravel**
 5. Paste [runcloud-deploy.sh](runcloud-deploy.sh) into the Git deployment script.
-   For Atomic deploys, use [runcloud-deploy-atomic.sh](runcloud-deploy-atomic.sh)
-   in the hook that runs after Composer install. Turn dev dependencies off.
+   Composer on RunCloud is `/usr/sbin/composer`. The script calls that file with
+   the PHP 8.3 binary. Re-paste the script if an older copy is already saved in
+   the panel. For Atomic deploys, use
+   [runcloud-deploy-atomic.sh](runcloud-deploy-atomic.sh) in the hook that runs
+   after Composer install. Turn dev dependencies off.
 
 ## 3. First-time environment
 

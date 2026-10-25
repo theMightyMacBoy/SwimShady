@@ -6,6 +6,7 @@ use App\Models\Command;
 use App\Models\Device;
 use App\Models\Firmware;
 use App\Models\HistoryEntry;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
@@ -138,5 +139,44 @@ class DeviceApiTest extends TestCase
         $firmware = Firmware::query()->where('channel', 'stable')->first();
         $this->actingAs($admin)->post('/firmware/'.$firmware->id.'/delete')->assertRedirect();
         $this->assertSame(0, Firmware::query()->where('channel', 'stable')->count());
+    }
+
+    public function test_new_device_stays_never_connected_until_the_first_heartbeat(): void
+    {
+        $admin = $this->makeUser(User::ADMIN);
+        $this->actingAs($admin)->post('/devices', ['name' => 'Spa', 'uid' => 'spa-1'])
+            ->assertRedirect()
+            ->assertSessionHas('new_token');
+        $token = session('new_token');
+
+        $device = Device::query()->where('uid', 'spa-1')->first();
+        $this->assertNotNull($device);
+        $this->assertNull($device->last_seen_at);
+        $this->assertSame('never', $device->connectionStatus());
+        $this->assertFalse($device->isOnline());
+
+        $this->actingAs($admin)->get('/devices')
+            ->assertOk()
+            ->assertSee('Never Connected')
+            ->assertDontSee('>online<', false)
+            ->assertDontSee('>offline<', false);
+
+        $this->actingAs($admin)->getJson('/api/ui/state?device='.$device->id)
+            ->assertOk()
+            ->assertJsonPath('online', false)
+            ->assertJsonPath('connection', 'never');
+
+        $this->withHeader('X-Device-Token', $token)->postJson('/api/device/heartbeat', [
+            'water_temp' => 76,
+            'firmware_version' => '2026.06.08.4',
+        ])->assertOk();
+
+        $device->refresh();
+        $this->assertNotNull($device->last_seen_at);
+        $this->assertSame('online', $device->connectionStatus());
+        $this->actingAs($admin)->get('/devices')->assertOk()->assertSee('>online<', false);
+        $this->actingAs($admin)->getJson('/api/ui/state?device='.$device->id)
+            ->assertJsonPath('online', true)
+            ->assertJsonPath('connection', 'online');
     }
 }

@@ -34,6 +34,7 @@ class UiApiController extends Controller
 
         return response()->json([
             'online' => $device->isOnline(),
+            'connection' => $device->connectionStatus(),
             'deviceId' => $device->id,
             'deviceName' => $device->name,
             'waterTemp' => $state?->water_temp,

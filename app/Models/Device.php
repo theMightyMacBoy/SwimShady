@@ -55,6 +55,18 @@ class Device extends Model
         return $this->belongsToMany(User::class, 'user_devices');
     }
 
+    protected static function booted(): void
+    {
+        // MariaDB stamps the first TIMESTAMP column with the current time when an
+        // INSERT leaves it out, so a brand-new device looked online for the
+        // offline window. Write NULL until a heartbeat records a real check-in.
+        static::creating(function (Device $device): void {
+            if (! array_key_exists('last_seen_at', $device->getAttributes())) {
+                $device->last_seen_at = null;
+            }
+        });
+    }
+
     public function isOnline(): bool
     {
         if ($this->last_seen_at === null) {
@@ -64,5 +76,15 @@ class Device extends Model
         $window = (int) config('swimshady.offline_after_seconds');
 
         return $this->last_seen_at->greaterThanOrEqualTo(now()->subSeconds($window));
+    }
+
+    /** never | online | offline */
+    public function connectionStatus(): string
+    {
+        if ($this->last_seen_at === null) {
+            return 'never';
+        }
+
+        return $this->isOnline() ? 'online' : 'offline';
     }
 }

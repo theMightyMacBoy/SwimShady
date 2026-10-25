@@ -107,7 +107,8 @@ async function postCommand(action, value) {
 // ---- rendering -------------------------------------------------------------
 
 function render(s) {
-  setConn(s.online);
+  const connection = s.connection || (s.online ? 'online' : 'offline');
+  setConn(connection);
 
   if (s.waterTempDisplay) {
     els.waterTemp.innerHTML = (s.waterTemp != null ? Math.round(s.waterTemp) : '--') + '<span class="unit">°F</span>';
@@ -155,16 +156,26 @@ function render(s) {
     els.heaterText.textContent = heat ? 'FIRING' : 'OFF';
   }
 
-  if (s.online) {
+  if (connection === 'online') {
     els.updated.textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } else if (connection === 'never') {
+    els.updated.textContent = 'Never Connected';
   } else {
     els.updated.textContent = s.reportedAt ? 'Device offline (last seen ' + s.reportedAt + ')' : 'Waiting for device…';
   }
 }
 
-function setConn(online) {
-  els.conn.className = 'conn ' + (online ? 'conn-ok' : 'conn-bad');
-  els.conn.title = online ? 'Connected' : 'Offline';
+function setConn(connection) {
+  if (connection === 'online') {
+    els.conn.className = 'conn conn-ok';
+    els.conn.title = 'Connected';
+  } else if (connection === 'never') {
+    els.conn.className = 'conn conn-unknown';
+    els.conn.title = 'Never Connected';
+  } else {
+    els.conn.className = 'conn conn-bad';
+    els.conn.title = 'Offline';
+  }
 }
 
 function setToggle(btn, on) {

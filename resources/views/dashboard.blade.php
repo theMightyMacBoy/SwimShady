@@ -103,5 +103,5 @@ data-can-control="{{ $canControl ? '1' : '0' }}"
 @endsection
 
 @push('scripts')
-  <script src="{{ asset('assets/app.js') }}?v=9"></script>
+  <script src="{{ asset('assets/app.js') }}?v=10"></script>
 @endpush

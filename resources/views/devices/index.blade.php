@@ -28,8 +28,10 @@
               <td>{{ $device->name }}</td>
               <td><code>{{ $device->uid }}</code></td>
               <td>
-                @if ($device->isOnline())
+                @if ($device->connectionStatus() === 'online')
                   <span class="badge badge-on">online</span>
+                @elseif ($device->connectionStatus() === 'never')
+                  <span class="badge badge-off">Never Connected</span>
                 @else
                   <span class="badge badge-off">offline</span>
                 @endif

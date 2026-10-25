@@ -1,3 +1,8 @@
+# Swim Shady — previous PHP frontend
+
+> Superseded by the Laravel app at the repository root ([deploy/RUNCLOUD.md](../deploy/RUNCLOUD.md)).
+> RunCloud's public path is the Laravel `/public` directory, not `webapp/public`.
+
 # Swim Shady — PHP frontend (thin client)
 
 Browser-facing control panel for the pool, served at **`<your-domain>`** on

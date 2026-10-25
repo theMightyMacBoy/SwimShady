@@ -2,8 +2,9 @@
 
 An ESP32 running [ESPHome](https://esphome.io) firmware that controls a swimming
 pool's circulation pump and gas heater (a Pentair **MasterTemp**). The device owns
-all safety and control logic. A companion PHP web app — **Swim Shady** — provides a
-control/display surface.
+all safety and control logic. **Swim Shady**, a Laravel app, is the control and
+display surface. It deploys from GitHub onto RunCloud and stores everything in
+MariaDB on that same server.
 
 > **The device is the source of truth.** Any UI (web app, Home Assistant, etc.) only
 > *reflects* and *triggers* device behavior — it must never reimplement safety logic.
@@ -26,7 +27,8 @@ resumes on the next visit, so the first load may take a moment.)
 | Path | What it is |
 |---|---|
 | [ESP32/pool-temp.yaml](ESP32/pool-temp.yaml) | As-built ESPHome firmware — the single source of truth for device behavior. (`ESP32/secrets.yaml` is git-ignored.) |
-| [webapp/](webapp/) | "Swim Shady" — the PHP control-panel web app. See [webapp/README.md](webapp/README.md). |
+| Laravel app (repo root) | Swim Shady. RunCloud public path is `/public`. See [deploy/RUNCLOUD.md](deploy/RUNCLOUD.md). |
+| [api/](api/) and [webapp/](webapp/) | Previous Azure API and PHP thin client. Not what RunCloud should serve. |
 | [CLAUDE.md](CLAUDE.md) | Condensed project context for AI assistants. |
 
 ---
@@ -179,31 +181,41 @@ The lockout timer shares `heater_last_off` with the cool-down debt clock.
 
 ---
 
-## 5. Cloud: Swim Shady API + web app
+## 5. Cloud: Swim Shady on RunCloud
 
-The device reports to a **C# ASP.NET Core API on Azure** (App Service + Azure SQL — the
-cloud source of truth), and a **thin PHP web app** ("Swim Shady") on **RunCloud** is the
-browser UI that calls that API. Details: [api/README.md](api/README.md) and
-[webapp/README.md](webapp/README.md).
+Swim Shady is one **Laravel** app. RunCloud serves it from this repo (public path
+`/public`) and auto-deploys when GitHub receives a push. **MariaDB on that same
+server** holds users, devices, state, the command queue, history, firmware
+metadata, and the IP ban list. Firmware binaries live on disk under
+`storage/app/private/firmware`, which survives a git pull. Setup steps are in
+[deploy/RUNCLOUD.md](deploy/RUNCLOUD.md).
 
 ```
-ESP32 (NAT) ──heartbeat (X-Device-Token)──▶ SwimShady.Api (Azure) ◀──REST (JWT)── PHP ◀── browser
-                                                  │
-                                                  ▼
-                                             Azure SQL
+ESP32 (NAT) ──heartbeat (X-Device-Token)──▶ Laravel on RunCloud ──▶ MariaDB
+browser ──session──▶ same app
 ```
 
-**Device-initiated (NAT-friendly).** The ESP32 is behind home NAT, so the cloud can't
-reach it. The device **heartbeats** to the API every **30 s** (`X-Device-Token` auth): it
-POSTs its state, pulls queued commands, and is offered OTA firmware updates. On boot it
-also `GET`s its last state to **resume after a reboot** (§4). The browser reads the last
-reported state and queues commands through the PHP app (JWT held in the session). All
-on-device safety logic runs locally regardless of the cloud.
+**Device-initiated (NAT-friendly).** The ESP32 is behind home NAT, so the server
+can't reach it. The device **heartbeats** every **30 s** (`X-Device-Token`): it
+POSTs its state, pulls queued commands, and is offered OTA firmware updates. On
+boot it `GET`s `/api/device/state` to **resume after a reboot** (§4). The browser
+signs in with a session and polls the same database. Safety logic stays on the
+device.
+
+`swimshady_url` is `https://swimshady.derekfreeze.com/api/device/heartbeat`.
+
+The device responses set `Content-Length` and `Cache-Control: no-transform`.
+RunCloud's nginx must have **gzip off** for this vhost
+([deploy/nginx-swimshady.conf](deploy/nginx-swimshady.conf)). The ESP32 HTTP
+client cannot read a chunked or gzipped body — that is what broke the earlier
+PHP app on this host.
 
 **Live demo:** a `demo` / `demo` login drives a fully simulated pool — see [Live demo](#-live-demo).
+The simulator advances when the dashboard is open, and pauses when it is not.
 
-**Abuse protection:** the API logs every login + request source IP and auto-bans after
-repeated auth failures, with admin whitelist/block (kept forever) and 30-day log retention.
+**Abuse protection:** every `/api` request and every login is logged by source IP.
+Repeated failures auto-ban. Admins whitelist or block from the IP Security page.
+Whitelist the pool's public IP (`WHITELIST_IPS`) so a bad token cannot ban the house.
 
 ### Firmware LAN auth/encryption (not yet enabled)
 The device exposes no `web_server: auth:`, `ota: password:`, or `api: encryption:` yet —

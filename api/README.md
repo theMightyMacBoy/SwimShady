@@ -1,3 +1,9 @@
+# SwimShady.Api — previous Azure backend
+
+> Superseded by the Laravel app at the repository root ([deploy/RUNCLOUD.md](../deploy/RUNCLOUD.md)).
+> Kept so the device contract and the old behavior stay readable during the cutover.
+> RunCloud should not serve this project.
+
 # SwimShady.Api — ASP.NET Core backend
 
 The single source of truth for Swim Shady: devices, state, command queue, history,

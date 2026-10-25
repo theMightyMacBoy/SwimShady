@@ -202,7 +202,7 @@ boot it `GET`s `/api/device/state` to **resume after a reboot** (§4). The brows
 signs in with a session and polls the same database. Safety logic stays on the
 device.
 
-`swimshady_url` is `https://<your-domain>/api/device/heartbeat`.
+`swimshady_url` is `https://swimshady.derekfreeze.com/api/device/heartbeat`.
 
 The device responses set `Content-Length` and `Cache-Control: no-transform`.
 RunCloud's nginx must have **gzip off** for this vhost

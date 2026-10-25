@@ -1,73 +1,83 @@
 # Deploy Swim Shady on RunCloud
 
-The Laravel app at the repository root is what RunCloud serves. Public path is
-`/public`. MariaDB runs on the same server. A push to the deploy branch runs
-the script in [runcloud-deploy.sh](runcloud-deploy.sh).
+The Laravel app at the repository root is what RunCloud serves at
+**https://swimshady.derekfreeze.com**. Public path is `/public`. MariaDB runs
+on the same server. A push to the deploy branch runs the script in
+[runcloud-deploy.sh](runcloud-deploy.sh).
 
 The ESP32 keeps calling `POST /api/device/heartbeat` and `GET /api/device/state`.
 Point `swimshady_url` in `ESP32/secrets.yaml` at:
 
 ```
-https://<your-domain>/api/device/heartbeat
+https://swimshady.derekfreeze.com/api/device/heartbeat
 ```
+
+The hostname already points at this RunCloud server and is still serving the
+old PHP app. Create the database and import the seed before changing that web
+app's files or public path.
 
 ## 1. Database
 
-In RunCloud, create a MariaDB database and user (Database → Add Database).
-Attach that database to the web app. The app uses Laravel's `mysql` driver,
-which speaks MariaDB.
+The database does not exist yet. In RunCloud, Database → Add Database. Name it
+`swimshady`, create a user, and attach that database to the web app. The app
+uses Laravel's `mysql` driver, which speaks MariaDB.
+
+Then import [../database/seed.sql](../database/seed.sql) into that empty
+database (Database → Import, or phpMyAdmin). The file creates every table and
+loads:
+
+- `admin` / `admin` (change this password after the first sign-in)
+- `demo` / `demo`, scoped to the simulated Demo Pool
+
+Import it only into an empty database. A second import drops the tables.
+
+Later deploys run `php artisan migrate` and `php artisan db:seed`. Migrate is
+a no-op once this file has been imported (the `migrations` rows are included).
+The seeder will not reset an existing password. It does add any `WHITELIST_IPS`
+from the environment.
 
 ## 2. Web app from GitHub
 
 1. Set the server's default PHP CLI to **8.3** or **8.4** (Laravel 13).
-2. Deploy New Web App → **Git Repository** → GitHub → this repo → branch `main`.
-3. Check **Automatically deploy when changes are pushed to this branch**. RunCloud
-   adds a read-only deploy key and a webhook; confirm both under the GitHub repo
-   settings (Deploy keys, Webhooks).
-4. Domain + SSL (Let's Encrypt).
-5. After the first deploy: **Settings → Basic / Stack**
-   - Public path: `/public`
+2. On the existing **swimshady.derekfreeze.com** web app, connect **Git Repository**
+   → GitHub → this repo → branch `main`. Check **Automatically deploy when changes
+   are pushed to this branch**. RunCloud adds a read-only deploy key and a webhook;
+   confirm both under the GitHub repo settings (Deploy keys, Webhooks).
+3. Domain stays `swimshady.derekfreeze.com` (SSL is already on this host).
+4. **Settings → Basic / Stack**
+   - Public path: `/public` (the Laravel directory at the repo root, not `webapp/public`)
    - PHP: 8.3 or 8.4
    - Web application type: **Laravel**
-6. Paste [runcloud-deploy.sh](runcloud-deploy.sh) into the Git deployment script.
+5. Paste [runcloud-deploy.sh](runcloud-deploy.sh) into the Git deployment script.
    For Atomic deploys, use [runcloud-deploy-atomic.sh](runcloud-deploy-atomic.sh)
    in the hook that runs after Composer install. Turn dev dependencies off.
 
 ## 3. First-time environment
 
-SSH in as the web app user, `cd` to the app root (RunCloud shows the path), then:
-
-```bash
-cp .env.example .env
-php artisan key:generate
-```
-
 In the RunCloud **Environment Variables** screen, set at least:
 
 ```
-APP_URL=https://<your-domain>
+APP_URL=https://swimshady.derekfreeze.com
 APP_ENV=production
 APP_DEBUG=false
 DB_CONNECTION=mysql
 DB_HOST=127.0.0.1
 DB_PORT=3306
-DB_DATABASE=<name>
+DB_DATABASE=swimshady
 DB_USERNAME=<user>
 DB_PASSWORD=<password>
 SESSION_SECURE_COOKIE=true
 WHITELIST_IPS=<pool public ip>
 ```
 
-Then:
+Use the database name, user, and password from the RunCloud database you just
+created. `APP_KEY` has to be set or logins fail. On any machine with this repo
+and PHP 8.3, run `php artisan key:generate --show` and paste the `base64:...`
+value as `APP_KEY`.
 
-```bash
-php artisan migrate --force
-php artisan db:seed --force
-```
-
-Seeding creates `admin` / `admin` and the public `demo` / `demo` pool. Change the
-admin password immediately. Later deploys re-run the seeder; it will not reset
-an existing password.
+If `database/seed.sql` is already imported, the first deploy's migrate and seed
+keep that data. If the database is still empty, that same deploy creates the
+tables and the `admin` / `demo` accounts. Change the admin password immediately.
 
 ## 4. Nginx must not gzip the device API
 
